@@ -1,10 +1,10 @@
 # Designing the Log-based HDF5 VOL Plugin
 As part of the ECP, we are exploring ways to implement the idea of storing write requests in a log-based layout in HDF5 files.
-The goal is to achieve fast parallel write performance by avoiding the expensive cost spent on inter-process communication in the MPI collective I/O.
+The goal is to achieve fast parallel write performance by avoiding the expensive cost spent on inter-process communication that organizes the data into a canonical-order layout.
 
 The latest HDF5 development incorporated an abstraction layer named the Virtual Object Layer (VOL) that allows advanced users to customize their I/O operations by supplying an I/O driver as a plug-in library module that can be developed independently from HDF5 and linked together with the native HDF5 libraries.
 To implement the log-based data layout, we use the HDF5 VOL as a platform to exercise various ideas and study their performance.
-The lessons learned from this exploration can help us understand the current limitations of HDF5 VOL and serve as a guidance for developers for future improvement.
+The lessons learned from this exploration can help us understand the current limitations of HDF5 VOL and provide a guidance for future development.
 
 This document serves as a place holder to encourage internal discussions, suggestions, and to show preliminary results for verifying the ideas.
 
@@ -20,43 +20,54 @@ This document serves as a place holder to encourage internal discussions, sugges
 
 ### Make use of HDF5 VDS
 
-HDF5 Virtual Dataset (VDS) is a feature that allows to store a dataset in a layout different from the regular HDF5 dataset, but can still be accessed transparently like a regular dataset.
+Virtual Dataset (VDS) is an HDF5 feature that allows to store a dataset in a layout different from the regular HDF5 dataset, while still accessible like a regular dataset.
 This lets us to implement the log-based layout on top of an existing HDF5 framework for better portability.
-A VDS may be comprised of multiple HDF5 regular datasets underneath, referred as the `target` datasets.
-If we used a single VDS to store multiple write requests made by users, then we can achieve the effect of log-based data layout.
-Creating a VDS requires users to construct multiple links that map part of its data space to the space of target datasets.
+A VDS may be comprised of multiple HDF5 regular datasets underneath, referred as the `source datasets`.
+If a single VDS allows us to store multiple write requests, one per source dataset, then we can use it to achieve the effect of log-based data layout.
+Note that creating a VDS requires a construct a mapping consisting of multiple links that connect virtual data space to the space of source datasets. Detailed information about the VDS can be found in
+* https://support.hdfgroup.org/HDF5/docNewFeatures/NewFeaturesVirtualDatasetDocs.html and
+* https://portal.hdfgroup.org/display/HDF5/Introduction+to+the+Virtual+Dataset++-+VDS
 
-A short description for creating a VDS
-* A VDS is created by setting the mappings in the dataset creation property list.
-* A mapping can be a portion of the data space.
-* Target datasets can be datasets stored in external files or the same file.
-* The selection of VDS and target dataset does not need to be the same, but the size must match.
-Detailed information about the VDS can be found in https://support.hdfgroup.org/HDF5/docNewFeatures/NewFeaturesVirtualDatasetDocs.html
+Steps for creating a VDS.
+1. Create the source datasets that will comprise the VDS
+2. Create a mappings in the dataset creation property list.
+   * Map elements from the source dataset to elements of the VDS (Repeat for each source dataset):
+     + Select elements in the source dataset (source selection)
+     + Select elements in the virtual dataset (destination selection)
+     + Map destination selections to source selections (see Functions for Working with a VDS)
+3. Create data space for VDS
+4. Create data type for VDS
+5. Create a VDS using the above property list, data space, and data type.
 
-We are considering the following implementation.
-First, we create a virtual dataset for each dataset is created by the user application.
-For each write request made by the user application, our VOL defines a mapping in the corresponding virtual dataset that maps the selected space to the data in the log dataset.
-Once write data is represented by VDS, reading the dataset can be done via the HDF5 VDS mapping mechanism, so the actual read operations are redirected to the corresponding target dataset.
+We are considering the following implementation steps.
+1. For each write request made by the user application, we define a source dataset and a mapping from it to the virtual dataset.
+2. Synchronize the mappings among all processes.
+3. Create a VDS, one for each regular dataset created by the user application.
+
+Reading the dataset from files containing log-based VDS can be done via the regular HDF5 read APIs.
+We assume the HDF5 internal VDS mapping mechanism can redirect the read requests to the corresponding source datasets.
 
 #### Current Limitations of VDS
-* **Lack of MPI-IO support** -- Currently, MPI-IO is not supported for VDS feature.
-   Thus, we need to develop in our VOL plugin an interface to the MPI VFL driver.
-   Below are two possible soltions while MPI-IO is not supported.
+* **Lack of MPI-IO support** -- Currently, MPI-IO is not supported for the VDS feature.
+   Other than developing an interface to the MPI VFL driver in our VOL plugin,
+   we are considering two possible soltions.
   + **Delay virtual dataset creation** --
     A workaround is to defer the creation of virtual datasets until file close time.
     The metadata is kept in memory in each process and gathered by rank 0 when closing the file.
-    Rank 0 reopens the file using the POSIX VFL driver and creates all virtual datasets.
+    Rank 0 creates the file using the POSIX VFL driver and creates all virtual datasets.
   + **Open the file in read-only mode** --
     The only way to support parallel read is to have individual processes open the file using the POSIX VFL driver.
     Read-write mode for parallel I/O to VDS is not supported by HDF5.
 
 #### Performance Study of VDS
-* Test program [vds.cpp](./vds.cpp) -- it first creates a 1024 x 1024 dataset of type int32 in a contiguous layout, followed by creating a VDS of the same size.
+* Test program [vds.cpp](./vds.cpp) --
+  it first creates a 1024 x 1024 dataset of type int32 in a contiguous layout, followed by creating a VDS of the same size.
   The n-th column of the virtual dataset maps to the n-th row of the contiguous dataset.
-  It reports a performance comparison of a column-wise access to the contiguous and the virtual dataset.
-* We expect accessing the virtual dataset to be faster than the contiguous dataset, because the access pattern for the VDS is contiguous in the file space.
-  However, we observed a poorer timings of accessing the virtual dataset.
+  At the end of runs, it reports a performance results that compare a column-wise access to the contiguous regular dataset and the virtual dataset.
+* We expect accessing the virtual dataset faster than the contiguous dataset, because the access pattern in the test program for the VDS is contiguous in the file space.
+  However, we observed a poor timings for the virtual dataset case.
   Further study reveals that the slow performance is caused by repeated file open and close operations.
+  This HDF5 internal implementation does not check whether different source datasets are stored in the same file.
 * Performance results of running the test program on a local server:
   ```
   Create virtual dataset: 80 ms
@@ -69,22 +80,23 @@ Once write data is represented by VDS, reading the dataset can be done via the H
   Column-wise read on the contiguous dataset: 1774 ms
   Column-wise read on the virtual dataset: 22143 ms
   ```
-* **Analysis** -- The VDS feature is designed to allow linking datasets across multiple files.
-  During the call to `H5Dread()`, the data access selection is first compared against the VDS mappings.
-  For each intersection, HDF5 opens the source file, reads the data, and close the file.
-  For a VDS with many mappings, the frequent file open and close operations become significant to hurt the performance.
+* **Analysis**
+  + It appears that VDS feature was designed to allow linking datasets across multiple files.
+    During the call to `H5Dread()`, the data access selection is first compared against the VDS mappings.
+    For each intersection, HDF5 opens the source file, reads the data, and close the file.
+    For a VDS with many mappings, the frequent file open and close operations can become significant and hurt the performance.
 * **Discussions**
-  + There is no workaround outside the HDF5.
-  + Develop a patch to HDF5 that uses a file cache to mitigate the poor performance.
-  + Develop a patch to HDF5 to keep the file open for future access.
+  + Developing a patch to HDF5 that uses a file cache to mitigate the poor performance?
+  + Develop a patch to HDF5 to keep the file open for future access?
 
 ---
 
 ### A Log-based VOL Plugin
-A design document contains the idea of implementing the log-based data layout in an HDF5 VOL plugin is available in [./design_log_base_vol.docx](./design_log_base_vol.docx).
+A design document contains the idea of implementing the log-based data layout in an HDF5 VOL plugin is available in
+* [./design_log_base_vol.docx](./design_log_base_vol.docx).
+
 This approach does not make use of HDF5 VDS.
 Instead, it implements its own mappings and access mechanism to the data stored in the log layout.
-
 
 ---
 
