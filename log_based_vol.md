@@ -41,15 +41,14 @@ Once write data is represented by VDS, reading the dataset can be done via the H
 #### Current Limitations of VDS
 * **Lack of MPI-IO support** -- Currently, MPI-IO is not supported for VDS feature.
    Thus, we need to develop in our VOL plugin an interface to the MPI VFL driver.
-
-  + Delay virtual dataset creation** --
-    A workaround is to delay the creation of virtual datasets until the file is closed.
-    The metadata is kept in memory during and session and gathered to the master rank (rank 0).
-    The master rank reopens the file using the POSIX VFL driver and creates all virtual datasets.
-  + Open the file in read-only mode
-    The easiest way to support reading is to have individual processes open the file using the POSIX VFL driver.
-    It requires the file to be opened in read-only mode, so HDF5 will not try to lock the file.
-    As a result, read and write modes are not supported.
+   Below are two possible soltions while MPI-IO is not supported.
+  + **Delay virtual dataset creation** --
+    A workaround is to defer the creation of virtual datasets until file close time.
+    The metadata is kept in memory in each process and gathered by rank 0 when closing the file.
+    Rank 0 reopens the file using the POSIX VFL driver and creates all virtual datasets.
+  + **Open the file in read-only mode** --
+    The only way to support parallel read is to have individual processes open the file using the POSIX VFL driver.
+    Read-write mode for parallel I/O to VDS is not supported by HDF5.
 
 #### Performance Study of VDS
 * Test program [vds.cpp](./vds.cpp) -- it first creates a 1024 x 1024 dataset of type int32 in a contiguous layout, followed by creating a VDS of the same size.
