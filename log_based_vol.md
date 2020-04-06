@@ -113,6 +113,12 @@ Instead, it implements its own mappings and access mechanism to the data stored 
   + Accelerate table lookup with a lookup table 
     We create a lookup table containing the offset of the first metadata entry of every dataset.
     It allows us to skip through irrelevant entries.
+  + Fix-sized VS variable-sized metadata entries.
+    Since different dataset has different dimensionality, the metadata entries vary in size.
+    We can store the metadata as is in the metadata table so that each entry differs in size.
+    Alternatively, we can generate fix-sized metadata entry that is large enough for the highest possible dimensionality (32 in HDF5).
+    It makes the structure of the metadata dataset easier to maintain at the cost of extra file space.
+
 * Reading from the log entries 
   The VOL traverse the metadata table and look for entries that intersect the selection.
   For every intersection, the VOL retrieve the intersecting part of the data and place it into the correct position in the application buffer.
