@@ -117,7 +117,10 @@ Instead, it implements its own mappings and access mechanism to the data stored 
     Since different dataset has different dimensionality, the metadata entries vary in size.
     We can store the metadata as is in the metadata table so that each entry differs in size.
     Alternatively, we can generate fix-sized metadata entry that is large enough for the highest possible dimensionality (32 in HDF5).
-    It makes the structure of the metadata dataset easier to maintain at the cost of extra file space.
+    * **GOOD**: It makes the structure of the metadata dataset easier to maintain at the cost of extra file space.
+      Fixed-size log entries also allows fast search.
+    * **BAD**: It can leave a large memory footprint when the number of requests is big and each data is a low
+      dimensional array. Lesson learned from E3SM shows out-of-memory error encountered on Cori KNL nodes.
 
 * Reading from the log entries 
   The VOL traverse the metadata table and look for entries that intersect the selection.
